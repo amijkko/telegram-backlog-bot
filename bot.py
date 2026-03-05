@@ -317,6 +317,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def escape_md(text: str) -> str:
+    """Escape Markdown special characters for Telegram."""
+    for ch in ("_", "*", "`", "[", "]", "(", ")", "~", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
 def format_file_pretty(file_id: str, content: str) -> tuple[str, list[dict]]:
     """Format markdown nicely for Telegram, collect open tasks."""
     lines = content.split("\n")
@@ -609,10 +616,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         save_to_kb(project_id, filename, text, summary)
 
         project_name = PROJECTS[project_id]["name"]
+        clean_summary = summary[:500].replace("*", "").replace("`", "").replace("_", "")
         await update.message.reply_text(
-            f"📚 Сохранено в KB **{project_name}**\n\n"
-            f"**{filename}**\n{summary[:500]}",
-            parse_mode="Markdown",
+            f"📚 Сохранено в KB {project_name}\n\n"
+            f"{filename}\n{clean_summary}",
         )
 
     except Exception as e:
