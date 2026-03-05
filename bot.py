@@ -135,6 +135,36 @@ def summarize_document(text: str, filename: str = "") -> str:
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
+def split_into_tasks(text: str) -> list[str]:
+    """Use GPT to split free-form text into actionable tasks."""
+    prompt = f"""Пользователь написал сообщение в свободной форме. Разбей его на конкретные actionable задачи.
+
+Правила:
+- Каждая задача — одно конкретное действие (позвонить, написать, подготовить, etc.)
+- Сохраняй имена, компании, детали из оригинала
+- Если в тексте только одна задача — верни только её
+- Если слова-маркеры приоритета (срочно, не важно, потом) — сохрани их в задаче
+- Формат ответа: каждая задача на отдельной строке, без нумерации и маркеров
+
+Сообщение: {text}"""
+
+    r = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=OPENAI_HEADERS,
+        json={
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 300,
+            "temperature": 0.2,
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+    response = r.json()["choices"][0]["message"]["content"].strip()
+    tasks = [line.strip().lstrip("•-–123456789.) ") for line in response.split("\n") if line.strip()]
+    return tasks if tasks else [text]
+
+
 # --- GitHub helpers ---
 
 def github_get_file(path: str) -> tuple[str, str] | None:
@@ -264,12 +294,14 @@ async def transcribe_voice(voice_file) -> str:
 
 async def process_task(update: Update, task_text: str, source: str = "") -> None:
     try:
-        label = add_task_to_github(task_text)
+        tasks = split_into_tasks(task_text)
         prefix = "🎤 " if source == "voice" else ""
-        await update.message.reply_text(
-            f"{prefix}[{label}] Добавлено в backlog:\n`- [ ] {task_text}`",
-            parse_mode="Markdown",
-        )
+        results = []
+        for task in tasks:
+            label = add_task_to_github(task)
+            results.append(f"[{label}] `- [ ] {task}`")
+        msg = prefix + "Добавлено в backlog:\n" + "\n".join(results)
+        await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
