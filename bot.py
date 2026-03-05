@@ -481,6 +481,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/crm — CRM инвесторов\n"
         "/tracks — рабочие треки\n"
         "/insights — инсайты по проектам\n"
+        "/project — инфо о проекте + документы\n"
         "/done — закрыть задачу\n\n"
         "💡 `инсайт: мысль` → сохранит в KB с тегами\n"
         "Закрыть задачу: `готово написать Грише`\n"
@@ -687,6 +688,46 @@ async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("\n\n".join(parts)[:4000], parse_mode="Markdown")
     else:
         await update.message.reply_text("Пока нет инсайтов. Напиши `инсайт: твоя мысль`", parse_mode="Markdown")
+
+
+async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    args = context.args
+    if not args or args[0] not in PROJECTS:
+        keys = ", ".join(f"`{k}`" for k in PROJECTS)
+        await update.message.reply_text(f"Укажи проект: /project {keys}", parse_mode="Markdown")
+        return
+    pid = args[0]
+    result = github_get_file(f"{PROJECTS[pid]['path']}/index.md")
+    if not result:
+        await update.message.reply_text("index.md не найден")
+        return
+    content = result[0]
+    # Extract "О проекте" section
+    if "## О проекте" in content:
+        about = content.split("## О проекте")[1].split("\n## ")[0].strip()
+    else:
+        about = None
+    # Extract "Ключевые документы" if present
+    if "**Ключевые документы**" in content:
+        docs = content.split("**Ключевые документы**")[1].split("\n## ")[0].strip()
+    else:
+        docs = None
+
+    parts = [f"📋 *{PROJECTS[pid]['name']}*"]
+    if about:
+        # Clean markdown for Telegram (bold markers already in text)
+        parts.append(about)
+    if docs:
+        parts.append(f"\n📎 *Ключевые документы*\n{docs}")
+    if not about and not docs:
+        parts.append("Описание проекта пока не заполнено.")
+
+    text = "\n\n".join(parts)
+    # Strip markdown that Telegram can't handle
+    clean = text.replace("**", "*")
+    await update.message.reply_text(clean[:4000], parse_mode="Markdown")
 
 
 async def cmd_tracks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -928,6 +969,7 @@ def main() -> None:
     app.add_handler(CommandHandler("crm", cmd_crm))
     app.add_handler(CommandHandler("tracks", cmd_tracks))
     app.add_handler(CommandHandler("insights", cmd_insights))
+    app.add_handler(CommandHandler("project", cmd_project))
     app.add_handler(CommandHandler("done", cmd_done))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
