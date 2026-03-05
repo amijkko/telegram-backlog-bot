@@ -135,6 +135,60 @@ def summarize_document(text: str, filename: str = "") -> str:
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
+INSIGHT_TAGS = [
+    "финансы", "инвест", "продукт", "стратегия", "маркетинг",
+    "технологии", "команда", "партнёры", "регуляция", "конкуренты",
+    "продажи", "клиенты", "операции", "идея",
+]
+
+
+def detect_insight_tags(text: str) -> list[str]:
+    """Use GPT to assign tags to an insight."""
+    tags_list = ", ".join(INSIGHT_TAGS)
+    prompt = f"""Прочитай инсайт и присвой ему 1-3 тега из списка: {tags_list}.
+
+Инсайт: {text}
+
+Ответь ТОЛЬКО тегами через запятую, без объяснений."""
+
+    r = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=OPENAI_HEADERS,
+        json={
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 30,
+            "temperature": 0,
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+    answer = r.json()["choices"][0]["message"]["content"].strip().lower()
+    tags = [t.strip() for t in answer.split(",") if t.strip() in INSIGHT_TAGS]
+    return tags if tags else ["идея"]
+
+
+def save_insight(project_id: str, text: str, tags: list[str]) -> None:
+    """Save insight to project's KB index.md under ## Insights section."""
+    project = PROJECTS[project_id]
+    index_path = f"{project['path']}/index.md"
+    result = github_get_file(index_path)
+    if not result:
+        return
+
+    content, sha = result
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    tags_str = " ".join(f"#{t}" for t in tags)
+    entry = f"- {text} — `{tags_str}` _{now}_"
+
+    if "## Insights" in content:
+        content = content.replace("## Insights", f"## Insights\n{entry}", 1)
+    else:
+        content = content.replace("## Documents", f"## Insights\n{entry}\n\n## Documents")
+
+    github_put_file(index_path, content, f"insight/{project_id}: {text[:40]}", sha)
+
+
 def split_into_tasks(text: str) -> list[str]:
     """Use GPT to split free-form text into actionable tasks."""
     prompt = f"""Пользователь написал сообщение в свободной форме. Разбей его на конкретные actionable задачи.
@@ -310,8 +364,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/backlog — бэклог\n"
         "/crm — CRM инвесторов\n"
         "/tracks — рабочие треки\n"
+        "/insights — инсайты по проектам\n"
         "/done — закрыть задачу\n\n"
-        "Закрыть задачу текстом: `готово написать Грише`\n"
+        "💡 `инсайт: мысль` → сохранит в KB с тегами\n"
+        "Закрыть задачу: `готово написать Грише`\n"
         "Приоритет: «срочно» → Urgent, «не важно» → Someday",
         parse_mode="Markdown",
     )
@@ -477,6 +533,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text("Не удалось закрыть задачу.")
 
 
+async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    args = context.args
+    project_ids = [args[0]] if args and args[0] in PROJECTS else list(PROJECTS.keys())
+    parts = []
+    for pid in project_ids:
+        result = github_get_file(f"{PROJECTS[pid]['path']}/index.md")
+        if not result:
+            continue
+        content = result[0]
+        if "## Insights" not in content:
+            continue
+        # Extract insights section
+        section = content.split("## Insights")[1].split("## ")[0].strip()
+        if section:
+            parts.append(f"💡 *{PROJECTS[pid]['name']}*\n{section}")
+    if parts:
+        await update.message.reply_text("\n\n".join(parts)[:4000], parse_mode="Markdown")
+    else:
+        await update.message.reply_text("Пока нет инсайтов. Напиши `инсайт: твоя мысль`", parse_mode="Markdown")
+
+
 async def cmd_tracks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
@@ -518,8 +597,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not task_text:
         return
 
-    # Check for "done/готово" prefix
     lower = task_text.lower()
+
+    # Check for "инсайт:" prefix
+    insight_match = re.match(r"^(?:инсайт|insight|💡)[:\s]+(.+)", lower, re.IGNORECASE)
+    if insight_match:
+        insight_text = task_text[insight_match.start(1):]  # preserve original case
+        try:
+            # Detect project
+            project_id = detect_project(insight_text)
+            if not project_id:
+                project_id = detect_project_gpt(insight_text)
+            if project_id == "unknown":
+                project_id = "custody"  # default
+
+            tags = detect_insight_tags(insight_text)
+            save_insight(project_id, insight_text, tags)
+            tags_str = " ".join(f"#{t}" for t in tags)
+            await update.message.reply_text(
+                f"💡 Инсайт сохранён в {PROJECTS[project_id]['name']}\n"
+                f"{tags_str}\n\n{insight_text}",
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Ошибка сохранения инсайта: {e}")
+        return
+
+    # Check for "done/готово" prefix
     done_match = re.match(r"^(?:готово|done|✅|сделано)[:\s]+(.+)", lower)
     if done_match:
         query = done_match.group(1).strip()
@@ -691,6 +794,7 @@ def main() -> None:
     app.add_handler(CommandHandler("backlog", cmd_backlog))
     app.add_handler(CommandHandler("crm", cmd_crm))
     app.add_handler(CommandHandler("tracks", cmd_tracks))
+    app.add_handler(CommandHandler("insights", cmd_insights))
     app.add_handler(CommandHandler("done", cmd_done))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
