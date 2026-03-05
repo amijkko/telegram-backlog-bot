@@ -323,8 +323,9 @@ def collect_open_tasks() -> list[dict]:
             continue
         content, _ = result
         for i, line in enumerate(content.split("\n")):
-            if line.strip().startswith("- [ ]"):
-                task_text = line.strip()[6:].strip()
+            s = line.strip()
+            if s.startswith("- [ ]") or re.match(r"^\d+\.\s*\[ \]", s):
+                task_text = re.sub(r"^(?:-|\d+\.)\s*\[ \]\s*", "", s)
                 if task_text and task_text != "[Task]":
                     tasks.append({"file": file_id, "line_idx": i, "text": task_text, "source": label})
     return tasks
@@ -339,8 +340,8 @@ def toggle_task_in_file(file_id: str, line_idx: int, close: bool = True) -> bool
     if line_idx >= len(lines):
         return False
 
-    old = "- [ ]" if close else "- [x]"
-    new = "- [x]" if close else "- [ ]"
+    old = "[ ]" if close else "[x]"
+    new = "[x]" if close else "[ ]"
     if old in lines[line_idx]:
         lines[line_idx] = lines[line_idx].replace(old, new, 1)
         github_put_file(file_id, "\n".join(lines), f"{'close' if close else 'reopen'}: {lines[line_idx][:50]}", sha)
@@ -398,10 +399,11 @@ def format_file_pretty(file_id: str, content: str) -> tuple[str, list[dict]]:
             formatted.append(f"  🔹 *{s[4:]}*")
         elif s.startswith("> "):
             formatted.append(f"_{s[2:]}_")
-        elif s.startswith("- [x]"):
-            formatted.append(f"  ✅ ~{s[6:].strip()}~")
-        elif s.startswith("- [ ]"):
-            task_text = s[6:].strip()
+        elif s.startswith("- [x]") or re.match(r"^\d+\.\s*\[x\]", s):
+            text_part = re.sub(r"^(?:-|\d+\.)\s*\[x\]\s*", "", s)
+            formatted.append(f"  ✅ ~{text_part}~")
+        elif s.startswith("- [ ]") or re.match(r"^\d+\.\s*\[ \]", s):
+            task_text = re.sub(r"^(?:-|\d+\.)\s*\[ \]\s*", "", s)
             if task_text and task_text != "[Task]":
                 num = len(tasks) + 1
                 formatted.append(f"  ⬜ {num}. {task_text}")
