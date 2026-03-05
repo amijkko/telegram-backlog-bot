@@ -19,12 +19,19 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "amijkko/personal-goals")
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 BACKLOG_FILE = "backlog.md"
 
-GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{BACKLOG_FILE}"
-HEADERS = {
+GITHUB_BASE = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
+GITHUB_API = f"{GITHUB_BASE}/{BACKLOG_FILE}"
+GH_HEADERS = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
     "Accept": "application/vnd.github+json",
 }
 
+OPENAI_HEADERS = {
+    "Authorization": f"Bearer {OPENAI_API_KEY}",
+    "Content-Type": "application/json",
+}
+
+# --- Priority detection ---
 
 URGENT_KEYWORDS = r"(?:срочно|важно|асап|asap|urgent|горит|критично)"
 LOW_KEYWORDS = r"(?:не\s*важно|неважно|когда-нибудь|потом|low|при\s*случае|без\s*спешки)"
@@ -41,6 +48,22 @@ PRIORITY_LABELS = {
     "low": "Someday",
 }
 
+# --- Projects for KB ---
+
+PROJECTS = {
+    "custody": {"name": "Custody", "path": "kb/custody"},
+    "sber": {"name": "Сбер Стейблкоин", "path": "kb/sber"},
+    "reksoft": {"name": "Reksoft Consulting", "path": "kb/reksoft"},
+    "blind-bets": {"name": "Blind Bets", "path": "kb/blind-bets"},
+}
+
+PROJECT_KEYWORDS = {
+    "custody": ["custody", "кастоди", "кастодиан", "mpc", "инвестор", "фандрайзинг", "crm"],
+    "sber": ["сбер", "стейблкоин", "stablecoin", "гаймаков", "sber"],
+    "reksoft": ["reksoft", "рексофт", "консалтинг", "скорочкин", "артём", "артем"],
+    "blind-bets": ["blind", "bets", "ставки", "денис", "autoforge"],
+}
+
 
 def detect_priority(text: str) -> tuple[str, str]:
     lower = text.lower()
@@ -53,70 +76,175 @@ def detect_priority(text: str) -> tuple[str, str]:
     return "normal", text
 
 
+def detect_project(text: str) -> str | None:
+    lower = text.lower()
+    for project_id, keywords in PROJECT_KEYWORDS.items():
+        for kw in keywords:
+            if kw in lower:
+                return project_id
+    return None
+
+
+def detect_project_gpt(text: str, filename: str = "") -> str:
+    prompt = f"""Определи к какому проекту относится этот документ/текст. Варианты:
+- custody (криптокастодиан для банков, инвесторы, фандрайзинг, MPC)
+- sber (стейблкоин Сбера, Гаймаков)
+- reksoft (консалтинг по крипте через Reksoft, Скорочкин, Артём)
+- blind-bets (проект Blind Bets, ставки, Денис, Autoforge)
+
+Файл: {filename}
+Текст: {text[:1000]}
+
+Ответь ОДНИМ словом — id проекта (custody/sber/reksoft/blind-bets). Если не можешь определить — ответь unknown."""
+
+    r = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=OPENAI_HEADERS,
+        json={
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 10,
+            "temperature": 0,
+        },
+        timeout=15,
+    )
+    r.raise_for_status()
+    answer = r.json()["choices"][0]["message"]["content"].strip().lower()
+    return answer if answer in PROJECTS else "unknown"
+
+
+def summarize_document(text: str, filename: str = "") -> str:
+    prompt = f"""Сделай краткое резюме документа на русском (3-5 пунктов). Выдели ключевые факты, цифры, действия.
+
+Файл: {filename}
+Текст:
+{text[:4000]}"""
+
+    r = httpx.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=OPENAI_HEADERS,
+        json={
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 500,
+            "temperature": 0.3,
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+# --- GitHub helpers ---
+
+def github_get_file(path: str) -> tuple[str, str] | None:
+    r = httpx.get(f"{GITHUB_BASE}/{path}", headers=GH_HEADERS)
+    if r.status_code == 404:
+        return None
+    r.raise_for_status()
+    data = r.json()
+    content = base64.b64decode(data["content"]).decode("utf-8")
+    return content, data["sha"]
+
+
+def github_put_file(path: str, content: str, message: str, sha: str = None) -> None:
+    encoded = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+    payload = {"message": message, "content": encoded}
+    if sha:
+        payload["sha"] = sha
+    r = httpx.put(f"{GITHUB_BASE}/{path}", headers=GH_HEADERS, json=payload)
+    r.raise_for_status()
+
+
 def add_task_to_github(task_text: str) -> str:
     priority, clean_text = detect_priority(task_text)
     section = SECTION_MAP[priority]
 
-    r = httpx.get(GITHUB_API, headers=HEADERS)
-    r.raise_for_status()
-    data = r.json()
-    sha = data["sha"]
-    content = base64.b64decode(data["content"]).decode("utf-8")
+    result = github_get_file(BACKLOG_FILE)
+    if not result:
+        return "error"
+    content, sha = result
 
     task_line = f"- [ ] {clean_text}"
-
     lines = content.split("\n")
-    result = []
+    out = []
     inserted = False
     in_section = False
 
     for line in lines:
         if line.strip() == section:
             in_section = True
-            result.append(line)
+            out.append(line)
             continue
-
         if in_section:
             if line.startswith("- [ ]"):
-                result.append(line)
+                out.append(line)
                 continue
             else:
-                result.append(task_line)
+                out.append(task_line)
                 inserted = True
                 in_section = False
-                result.append(line)
+                out.append(line)
                 continue
-
-        result.append(line)
+        out.append(line)
 
     if not inserted:
-        result.append(task_line)
+        out.append(task_line)
 
-    new_content = "\n".join(result)
-    encoded = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
-
-    r = httpx.put(
-        GITHUB_API,
-        headers=HEADERS,
-        json={
-            "message": f"backlog: {task_text[:50]}",
-            "content": encoded,
-            "sha": sha,
-        },
-    )
-    r.raise_for_status()
+    github_put_file(BACKLOG_FILE, "\n".join(out), f"backlog: {task_text[:50]}", sha)
     return PRIORITY_LABELS[priority]
 
+
+def save_to_kb(project_id: str, filename: str, text: str, summary: str) -> None:
+    project = PROJECTS[project_id]
+    now = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    safe_name = re.sub(r"[^\w\-.]", "_", filename.rsplit(".", 1)[0])
+    doc_path = f"{project['path']}/{now}_{safe_name}.md"
+
+    doc_content = f"""# {filename}
+*Added: {datetime.now().strftime("%Y-%m-%d %H:%M")}*
+*Project: {project['name']}*
+
+## Summary
+{summary}
+
+## Full Text
+{text[:10000]}
+"""
+    github_put_file(doc_path, doc_content, f"kb/{project_id}: {filename[:40]}")
+
+    # Update index
+    result = github_get_file(f"{project['path']}/index.md")
+    if result:
+        index_content, index_sha = result
+        entry = f"- [{filename}]({now}_{safe_name}.md) — {datetime.now().strftime('%Y-%m-%d')}"
+        index_content = index_content.replace(
+            "## Documents",
+            f"## Documents\n{entry}",
+        )
+        github_put_file(
+            f"{project['path']}/index.md",
+            index_content,
+            f"kb index: {filename[:40]}",
+            index_sha,
+        )
+
+
+# --- Telegram handlers ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
     await update.message.reply_text(
-        "Привет! Напиши задачу — я добавлю её в backlog.\n\n"
-        "Приоритет определяю по словам:\n"
-        "• «срочно/важно/асап» → Urgent\n"
-        "• «не важно/потом/при случае» → Someday\n"
-        "• без маркера → Important"
+        "Привет! Вот что я умею:\n\n"
+        "📝 **Текст** → задача в backlog (приоритет по словам)\n"
+        "🎤 **Голосовое** → распознаю и добавлю в backlog\n"
+        "📎 **Файл/документ** → сохраню в базу знаний проекта\n\n"
+        "Приоритет: «срочно» → Urgent, «не важно» → Someday\n"
+        "Проекты: custody, sber, reksoft, blind-bets\n\n"
+        "К файлу можно добавить подпись с названием проекта, "
+        "иначе определю автоматически.",
+        parse_mode="Markdown",
     )
 
 
@@ -137,7 +265,7 @@ async def transcribe_voice(voice_file) -> str:
 async def process_task(update: Update, task_text: str, source: str = "") -> None:
     try:
         label = add_task_to_github(task_text)
-        prefix = f"🎤 " if source == "voice" else ""
+        prefix = "🎤 " if source == "voice" else ""
         await update.message.reply_text(
             f"{prefix}[{label}] Добавлено в backlog:\n`- [ ] {task_text}`",
             parse_mode="Markdown",
@@ -149,18 +277,15 @@ async def process_task(update: Update, task_text: str, source: str = "") -> None
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
-
     task_text = update.message.text.strip()
     if not task_text:
         return
-
     await process_task(update, task_text)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
-
     try:
         voice_file = await update.message.voice.get_file()
         task_text = await transcribe_voice(voice_file)
@@ -169,8 +294,105 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Ошибка распознавания: {e}")
 
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+
+    doc = update.message.document
+    caption = update.message.caption or ""
+    filename = doc.file_name or "document"
+
+    await update.message.reply_text(f"📎 Получил `{filename}`, обрабатываю...", parse_mode="Markdown")
+
+    try:
+        # Download file
+        tg_file = await doc.get_file()
+        buf = bytearray()
+        await tg_file.download_as_bytearray(buf)
+        raw = bytes(buf)
+
+        # Extract text based on file type
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+        if ext == "pdf":
+            text = extract_pdf_text(raw)
+        elif ext in ("txt", "md", "csv", "json", "py", "js", "ts", "sol"):
+            text = raw.decode("utf-8", errors="replace")
+        elif ext in ("xlsx", "xls"):
+            text = extract_xlsx_text(raw)
+        elif ext in ("doc", "docx"):
+            text = raw.decode("utf-8", errors="replace")[:500] + "\n[Binary document — partial extraction]"
+        else:
+            text = raw.decode("utf-8", errors="replace")[:2000]
+
+        if not text.strip():
+            await update.message.reply_text("Не удалось извлечь текст из файла.")
+            return
+
+        # Detect project
+        project_id = detect_project(caption) if caption else None
+        if not project_id:
+            project_id = detect_project(filename)
+        if not project_id:
+            project_id = detect_project_gpt(text, filename)
+
+        if project_id == "unknown":
+            await update.message.reply_text(
+                "Не могу определить проект. Добавь подпись к файлу:\n"
+                "`custody`, `sber`, `reksoft` или `blind-bets`",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Summarize
+        summary = summarize_document(text, filename)
+
+        # Save to KB
+        save_to_kb(project_id, filename, text, summary)
+
+        project_name = PROJECTS[project_id]["name"]
+        await update.message.reply_text(
+            f"📚 Сохранено в KB **{project_name}**\n\n"
+            f"**{filename}**\n{summary[:500]}",
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка обработки файла: {e}")
+
+
+def extract_pdf_text(raw: bytes) -> str:
+    import subprocess
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+        f.write(raw)
+        f.flush()
+        result = subprocess.run(
+            ["pdftotext", f.name, "-"],
+            capture_output=True, text=True, timeout=30,
+        )
+    return result.stdout if result.returncode == 0 else ""
+
+
+def extract_xlsx_text(raw: bytes) -> str:
+    try:
+        import openpyxl
+        import io
+        wb = openpyxl.load_workbook(io.BytesIO(raw))
+        lines = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            lines.append(f"=== {sheet_name} ===")
+            for row in ws.iter_rows(values_only=True):
+                vals = [str(c) if c is not None else "" for c in row]
+                if any(vals):
+                    lines.append("\t".join(vals))
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def main() -> None:
-    # Clear any existing webhook to avoid conflicts
     print("Clearing webhook and waiting for old instance...")
     httpx.post(
         f"https://api.telegram.org/bot{TOKEN}/deleteWebhook",
@@ -182,6 +404,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     print(f"Bot started, repo: {GITHUB_REPO}")
     app.run_polling(drop_pending_updates=True)
 
