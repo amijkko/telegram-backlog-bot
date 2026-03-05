@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import base64
@@ -24,15 +25,44 @@ HEADERS = {
 }
 
 
-def add_task_to_github(task_text: str) -> None:
+URGENT_KEYWORDS = r"(?:срочно|важно|асап|asap|urgent|горит|критично)"
+LOW_KEYWORDS = r"(?:не\s*важно|неважно|когда-нибудь|потом|low|при\s*случае|без\s*спешки)"
+
+SECTION_MAP = {
+    "urgent": "## Urgent (this week)",
+    "normal": "## Important (next 2-3 weeks)",
+    "low": "## Someday (no deadline)",
+}
+
+PRIORITY_LABELS = {
+    "urgent": "Urgent",
+    "normal": "Important",
+    "low": "Someday",
+}
+
+
+def detect_priority(text: str) -> tuple[str, str]:
+    lower = text.lower()
+    if re.search(URGENT_KEYWORDS, lower):
+        clean = re.sub(URGENT_KEYWORDS, "", lower, count=1).strip(" ,:-—")
+        return "urgent", clean or text
+    if re.search(LOW_KEYWORDS, lower):
+        clean = re.sub(LOW_KEYWORDS, "", lower, count=1).strip(" ,:-—")
+        return "low", clean or text
+    return "normal", text
+
+
+def add_task_to_github(task_text: str) -> str:
+    priority, clean_text = detect_priority(task_text)
+    section = SECTION_MAP[priority]
+
     r = httpx.get(GITHUB_API, headers=HEADERS)
     r.raise_for_status()
     data = r.json()
     sha = data["sha"]
     content = base64.b64decode(data["content"]).decode("utf-8")
 
-    section = "## Important (next 2-3 weeks)"
-    task_line = f"- [ ] {task_text}"
+    task_line = f"- [ ] {clean_text}"
 
     lines = content.split("\n")
     result = []
@@ -74,13 +104,18 @@ def add_task_to_github(task_text: str) -> None:
         },
     )
     r.raise_for_status()
+    return PRIORITY_LABELS[priority]
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
     await update.message.reply_text(
-        "Привет! Просто напиши задачу — я добавлю её в backlog."
+        "Привет! Напиши задачу — я добавлю её в backlog.\n\n"
+        "Приоритет определяю по словам:\n"
+        "• «срочно/важно/асап» → Urgent\n"
+        "• «не важно/потом/при случае» → Someday\n"
+        "• без маркера → Important"
     )
 
 
@@ -93,8 +128,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     try:
-        add_task_to_github(task_text)
-        await update.message.reply_text(f"Добавлено в backlog:\n`- [ ] {task_text}`", parse_mode="Markdown")
+        label = add_task_to_github(task_text)
+        await update.message.reply_text(f"[{label}] Добавлено в backlog:\n`- [ ] {task_text}`", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
