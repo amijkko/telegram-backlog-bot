@@ -65,6 +65,119 @@ PROJECT_KEYWORDS = {
 }
 
 
+WEEKDAYS_RU = {
+    "понедельник": 0, "вторник": 1, "среду": 2, "среда": 2,
+    "четверг": 3, "пятницу": 4, "пятница": 4,
+    "субботу": 5, "суббота": 5, "воскресенье": 6,
+}
+
+MONTHS_RU = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
+    "мая": 5, "июня": 6, "июля": 7, "августа": 8,
+    "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
+
+DAY_NAMES_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def parse_date(text: str) -> tuple[str | None, str]:
+    """Extract date from Russian text. Returns (date_label, cleaned_text)."""
+    from datetime import timedelta
+    today = datetime.now().date()
+    lower = text.lower()
+
+    # "сегодня"
+    m = re.search(r"\bсегодня\b", lower)
+    if m:
+        d = today
+        clean = text[:m.start()] + text[m.end():]
+        label = f"{DAY_NAMES_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
+        return label, clean.strip(" ,:-—")
+
+    # "завтра"
+    m = re.search(r"\bзавтра\b", lower)
+    if m:
+        d = today + timedelta(days=1)
+        clean = text[:m.start()] + text[m.end():]
+        label = f"{DAY_NAMES_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
+        return label, clean.strip(" ,:-—")
+
+    # "послезавтра"
+    m = re.search(r"\bпослезавтра\b", lower)
+    if m:
+        d = today + timedelta(days=2)
+        clean = text[:m.start()] + text[m.end():]
+        label = f"{DAY_NAMES_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
+        return label, clean.strip(" ,:-—")
+
+    # "через N дней/дня"
+    m = re.search(r"\bчерез\s+(\d+)\s+(?:день|дня|дней)\b", lower)
+    if m:
+        d = today + timedelta(days=int(m.group(1)))
+        clean = text[:m.start()] + text[m.end():]
+        label = f"{DAY_NAMES_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
+        return label, clean.strip(" ,:-—")
+
+    # "в понедельник" / "на среду" / "во вторник" (next occurrence)
+    for day_name, day_num in WEEKDAYS_RU.items():
+        pattern = rf"\b(?:в|на|во)\s+(?:след(?:ующ[а-я]*)?\s+)?{day_name}\b"
+        m = re.search(pattern, lower)
+        if m:
+            is_next = "след" in m.group(0)
+            days_ahead = (day_num - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            if is_next and days_ahead < 7:
+                days_ahead += 7
+            d = today + timedelta(days=days_ahead)
+            clean = text[:m.start()] + text[m.end():]
+            label = f"{DAY_NAMES_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
+            return label, clean.strip(" ,:-—")
+
+    # "на следующей неделе" (Monday)
+    m = re.search(r"\bна\s+след(?:ующ[а-я]*)?\s+недел[а-яё]+\b", lower)
+    if m:
+        days_ahead = (0 - today.weekday()) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        d = today + timedelta(days=days_ahead)
+        clean = text[:m.start()] + text[m.end():]
+        label = f"{DAY_NAMES_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
+        return label, clean.strip(" ,:-—")
+
+    # "N марта" / "N мая" etc
+    for month_name, month_num in MONTHS_RU.items():
+        pattern = rf"\b(\d{{1,2}})\s+{month_name}\b"
+        m = re.search(pattern, lower)
+        if m:
+            day = int(m.group(1))
+            year = today.year
+            try:
+                from datetime import date
+                d = date(year, month_num, day)
+                if d < today:
+                    d = date(year + 1, month_num, day)
+            except ValueError:
+                continue
+            clean = text[:m.start()] + text[m.end():]
+            label = f"{DAY_NAMES_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
+            return label, clean.strip(" ,:-—")
+
+    # "в понедельник" without preposition — just weekday name
+    for day_name, day_num in WEEKDAYS_RU.items():
+        m = re.search(rf"\b{day_name}\b", lower)
+        if m:
+            days_ahead = (day_num - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            d = today + timedelta(days=days_ahead)
+            clean = text[:m.start()] + text[m.end():]
+            label = f"{DAY_NAMES_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
+            return label, clean.strip(" ,:-—")
+
+    return None, text
+
+
 def detect_priority(text: str) -> tuple[str, str]:
     lower = text.lower()
     if re.search(URGENT_KEYWORDS, lower):
@@ -241,7 +354,8 @@ def github_put_file(path: str, content: str, message: str, sha: str = None) -> N
 
 
 def add_task_to_github(task_text: str) -> str:
-    priority, clean_text = detect_priority(task_text)
+    date_label, clean_text = parse_date(task_text)
+    priority, clean_text = detect_priority(clean_text)
     section = SECTION_MAP[priority]
 
     result = github_get_file(BACKLOG_FILE)
@@ -249,7 +363,8 @@ def add_task_to_github(task_text: str) -> str:
         return "error"
     content, sha = result
 
-    task_line = f"- [ ] {clean_text}"
+    date_suffix = f" (→ {date_label})" if date_label else ""
+    task_line = f"- [ ] {clean_text}{date_suffix}"
     lines = content.split("\n")
     out = []
     inserted = False
