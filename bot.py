@@ -262,20 +262,75 @@ def save_to_kb(project_id: str, filename: str, text: str, summary: str) -> None:
 
 # --- Telegram handlers ---
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
     await update.message.reply_text(
         "Привет! Вот что я умею:\n\n"
-        "📝 **Текст** → задача в backlog (приоритет по словам)\n"
-        "🎤 **Голосовое** → распознаю и добавлю в backlog\n"
-        "📎 **Файл/документ** → сохраню в базу знаний проекта\n\n"
-        "Приоритет: «срочно» → Urgent, «не важно» → Someday\n"
-        "Проекты: custody, sber, reksoft, blind-bets\n\n"
-        "К файлу можно добавить подпись с названием проекта, "
-        "иначе определю автоматически.",
+        "📝 **Текст** → задачи в backlog\n"
+        "🎤 **Голосовое** → распознаю и добавлю\n"
+        "📎 **Файл** → сохраню в KB проекта\n\n"
+        "**Команды:**\n"
+        "/today — задачи на сегодня\n"
+        "/week — план на неделю\n"
+        "/backlog — бэклог\n"
+        "/crm — CRM инвесторов\n"
+        "/tracks — рабочие треки\n\n"
+        "Приоритет: «срочно» → Urgent, «не важно» → Someday",
         parse_mode="Markdown",
     )
+
+
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    result = github_get_file("daily.md")
+    if result:
+        text = result[0]
+        # Trim to fit Telegram limit
+        await update.message.reply_text(text[:4000], parse_mode=None)
+    else:
+        await update.message.reply_text("daily.md не найден")
+
+
+async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    result = github_get_file("weekly.md")
+    if result:
+        await update.message.reply_text(result[0][:4000], parse_mode=None)
+    else:
+        await update.message.reply_text("weekly.md не найден")
+
+
+async def cmd_backlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    result = github_get_file("backlog.md")
+    if result:
+        await update.message.reply_text(result[0][:4000], parse_mode=None)
+    else:
+        await update.message.reply_text("backlog.md не найден")
+
+
+async def cmd_crm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    result = github_get_file("crm.md")
+    if result:
+        await update.message.reply_text(result[0][:4000], parse_mode=None)
+    else:
+        await update.message.reply_text("crm.md не найден")
+
+
+async def cmd_tracks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    result = github_get_file("tracks.md")
+    if result:
+        await update.message.reply_text(result[0][:4000], parse_mode=None)
+    else:
+        await update.message.reply_text("tracks.md не найден")
 
 
 async def transcribe_voice(voice_file) -> str:
@@ -454,7 +509,12 @@ def main() -> None:
     time.sleep(5)
 
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("week", cmd_week))
+    app.add_handler(CommandHandler("backlog", cmd_backlog))
+    app.add_handler(CommandHandler("crm", cmd_crm))
+    app.add_handler(CommandHandler("tracks", cmd_tracks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
