@@ -16,6 +16,7 @@ TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_USER_ID = int(os.environ["TELEGRAM_USER_ID"])
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "amijkko/personal-goals")
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 BACKLOG_FILE = "backlog.md"
 
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{BACKLOG_FILE}"
@@ -119,6 +120,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def transcribe_voice(voice_file) -> str:
+    buf = bytearray()
+    await voice_file.download_as_bytearray(buf)
+    r = httpx.post(
+        "https://api.openai.com/v1/audio/transcriptions",
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+        data={"model": "whisper-1", "language": "ru"},
+        files={"file": ("voice.ogg", bytes(buf), "audio/ogg")},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["text"]
+
+
+async def process_task(update: Update, task_text: str, source: str = "") -> None:
+    try:
+        label = add_task_to_github(task_text)
+        prefix = f"🎤 " if source == "voice" else ""
+        await update.message.reply_text(
+            f"{prefix}[{label}] Добавлено в backlog:\n`- [ ] {task_text}`",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
@@ -127,11 +154,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not task_text:
         return
 
+    await process_task(update, task_text)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+
     try:
-        label = add_task_to_github(task_text)
-        await update.message.reply_text(f"[{label}] Добавлено в backlog:\n`- [ ] {task_text}`", parse_mode="Markdown")
+        voice_file = await update.message.voice.get_file()
+        task_text = await transcribe_voice(voice_file)
+        await process_task(update, task_text, source="voice")
     except Exception as e:
-        await update.message.reply_text(f"Ошибка: {e}")
+        await update.message.reply_text(f"Ошибка распознавания: {e}")
 
 
 def main() -> None:
@@ -146,6 +181,7 @@ def main() -> None:
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     print(f"Bot started, repo: {GITHUB_REPO}")
     app.run_polling(drop_pending_updates=True)
 
