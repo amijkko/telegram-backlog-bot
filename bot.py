@@ -690,6 +690,23 @@ async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Пока нет инсайтов. Напиши `инсайт: твоя мысль`", parse_mode="Markdown")
 
 
+def extract_doc_summary(project_path: str, doc_link: str) -> str | None:
+    """Fetch a KB document and extract its Summary section."""
+    # doc_link is like "[Title](filename.md)"
+    m = re.search(r"\(([^)]+\.md)\)", doc_link)
+    if not m:
+        return None
+    doc_path = f"{project_path}/{m.group(1)}"
+    result = github_get_file(doc_path)
+    if not result:
+        return None
+    content = result[0]
+    if "## Summary" not in content:
+        return None
+    summary = content.split("## Summary")[1].split("\n## ")[0].strip()
+    return summary
+
+
 async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
@@ -699,35 +716,50 @@ async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"Укажи проект: /project {keys}", parse_mode="Markdown")
         return
     pid = args[0]
-    result = github_get_file(f"{PROJECTS[pid]['path']}/index.md")
+    project = PROJECTS[pid]
+    result = github_get_file(f"{project['path']}/index.md")
     if not result:
         await update.message.reply_text("index.md не найден")
         return
     content = result[0]
+
     # Extract "О проекте" section
+    about = None
     if "## О проекте" in content:
         about = content.split("## О проекте")[1].split("\n## ")[0].strip()
-    else:
-        about = None
-    # Extract "Ключевые документы" if present
-    if "**Ключевые документы**" in content:
-        docs = content.split("**Ключевые документы**")[1].split("\n## ")[0].strip()
-    else:
-        docs = None
 
-    parts = [f"📋 *{PROJECTS[pid]['name']}*"]
+    # Extract key doc links and fetch summaries
+    key_docs = []
+    if "**Ключевые документы**" in content:
+        docs_section = content.split("**Ключевые документы**")[1].split("\n## ")[0].strip()
+        for line in docs_section.split("\n"):
+            line = line.strip()
+            if line.startswith("- ["):
+                # Extract title
+                title_m = re.match(r"- \[([^\]]+)\]", line)
+                title = title_m.group(1) if title_m else "Документ"
+                summary = extract_doc_summary(project["path"], line)
+                if summary:
+                    key_docs.append((title, summary))
+
+    await update.message.reply_text(f"📋 Загружаю данные по {project['name']}...")
+
+    # Build messages
+    parts = [f"📋 *{project['name']}*"]
     if about:
-        # Clean markdown for Telegram (bold markers already in text)
-        parts.append(about)
-    if docs:
-        parts.append(f"\n📎 *Ключевые документы*\n{docs}")
-    if not about and not docs:
+        parts.append(about.replace("**", "*"))
+    if not about:
         parts.append("Описание проекта пока не заполнено.")
 
-    text = "\n\n".join(parts)
-    # Strip markdown that Telegram can't handle
-    clean = text.replace("**", "*")
-    await update.message.reply_text(clean[:4000], parse_mode="Markdown")
+    # Send main info
+    await update.message.reply_text("\n\n".join(parts)[:4000], parse_mode="Markdown")
+
+    # Send each key doc as separate message
+    for title, summary in key_docs:
+        clean_title = title.replace("_", " ")
+        clean_summary = summary.replace("*", "").replace("`", "").replace("_", " ")
+        doc_text = f"📎 *{clean_title}*\n\n{clean_summary}"
+        await update.message.reply_text(doc_text[:4000], parse_mode="Markdown")
 
 
 async def cmd_tracks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
