@@ -100,21 +100,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def main() -> None:
-    # Clear any existing webhook/polling to avoid conflicts
-    import asyncio
-    async def clear_webhook():
-        bot = Bot(TOKEN)
-        await bot.delete_webhook(drop_pending_updates=True)
-        await bot.shutdown()
-    asyncio.run(clear_webhook())
-    print("Webhook cleared, waiting for old instance to stop...")
+    # Clear any existing webhook to avoid conflicts
+    print("Clearing webhook and waiting for old instance...")
+    httpx.post(
+        f"https://api.telegram.org/bot{TOKEN}/deleteWebhook",
+        json={"drop_pending_updates": True},
+    )
     time.sleep(5)
 
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print(f"Bot started, repo: {GITHUB_REPO}")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
