@@ -1,10 +1,12 @@
 import os
+import sys
+import time
 import base64
 from datetime import datetime
 
 import httpx
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 load_dotenv()
@@ -98,11 +100,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def main() -> None:
+    # Clear any existing webhook/polling to avoid conflicts
+    import asyncio
+    async def clear_webhook():
+        bot = Bot(TOKEN)
+        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.shutdown()
+    asyncio.run(clear_webhook())
+    print("Webhook cleared, waiting for old instance to stop...")
+    time.sleep(5)
+
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print(f"Bot started, repo: {GITHUB_REPO}")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
