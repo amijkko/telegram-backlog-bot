@@ -7,8 +7,8 @@ from datetime import datetime
 
 import httpx
 from dotenv import load_dotenv
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 load_dotenv()
 
@@ -260,6 +260,40 @@ def save_to_kb(project_id: str, filename: str, text: str, summary: str) -> None:
         )
 
 
+def collect_open_tasks() -> list[dict]:
+    """Collect all open tasks from daily, weekly, backlog."""
+    tasks = []
+    for file_id, label in [("daily.md", "today"), ("weekly.md", "week"), ("backlog.md", "backlog")]:
+        result = github_get_file(file_id)
+        if not result:
+            continue
+        content, _ = result
+        for i, line in enumerate(content.split("\n")):
+            if line.strip().startswith("- [ ]"):
+                task_text = line.strip()[6:].strip()
+                if task_text and task_text != "[Task]":
+                    tasks.append({"file": file_id, "line_idx": i, "text": task_text, "source": label})
+    return tasks
+
+
+def toggle_task_in_file(file_id: str, line_idx: int, close: bool = True) -> bool:
+    result = github_get_file(file_id)
+    if not result:
+        return False
+    content, sha = result
+    lines = content.split("\n")
+    if line_idx >= len(lines):
+        return False
+
+    old = "- [ ]" if close else "- [x]"
+    new = "- [x]" if close else "- [ ]"
+    if old in lines[line_idx]:
+        lines[line_idx] = lines[line_idx].replace(old, new, 1)
+        github_put_file(file_id, "\n".join(lines), f"{'close' if close else 'reopen'}: {lines[line_idx][:50]}", sha)
+        return True
+    return False
+
+
 # --- Telegram handlers ---
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -275,7 +309,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/week — план на неделю\n"
         "/backlog — бэклог\n"
         "/crm — CRM инвесторов\n"
-        "/tracks — рабочие треки\n\n"
+        "/tracks — рабочие треки\n"
+        "/done — закрыть задачу\n\n"
+        "Закрыть задачу текстом: `готово написать Грише`\n"
         "Приоритет: «срочно» → Urgent, «не важно» → Someday",
         parse_mode="Markdown",
     )
@@ -323,6 +359,62 @@ async def cmd_crm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("crm.md не найден")
 
 
+async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    tasks = collect_open_tasks()
+    if not tasks:
+        await update.message.reply_text("Нет открытых задач!")
+        return
+
+    # Store tasks in context for callback
+    context.user_data["tasks"] = tasks
+
+    # Build inline keyboard (max 30 tasks to avoid Telegram limits)
+    keyboard = []
+    for i, t in enumerate(tasks[:30]):
+        icon = {"today": "📅", "week": "📋", "backlog": "📝"}.get(t["source"], "")
+        label = f"{icon} {t['text'][:45]}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"done:{i}")])
+
+    await update.message.reply_text(
+        "Выбери задачу для закрытия:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query.from_user.id != ALLOWED_USER_ID:
+        return
+    await query.answer()
+
+    data = query.data
+    if data.startswith("done:"):
+        idx = int(data.split(":")[1])
+        tasks = context.user_data.get("tasks", [])
+        if idx >= len(tasks):
+            await query.edit_message_text("Задача не найдена.")
+            return
+
+        task = tasks[idx]
+        ok = toggle_task_in_file(task["file"], task["line_idx"], close=True)
+        if ok:
+            await query.edit_message_text(f"✅ Закрыто:\n~{task['text']}~", parse_mode="Markdown")
+        else:
+            await query.edit_message_text("Не удалось закрыть задачу.")
+
+    elif data.startswith("reopen:"):
+        parts = data.split(":", 2)
+        file_id = parts[1]
+        line_idx = int(parts[2])
+        ok = toggle_task_in_file(file_id, line_idx, close=False)
+        if ok:
+            await query.edit_message_text("🔄 Задача переоткрыта.")
+        else:
+            await query.edit_message_text("Не удалось переоткрыть задачу.")
+
+
 async def cmd_tracks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
@@ -367,6 +459,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     task_text = update.message.text.strip()
     if not task_text:
         return
+
+    # Check for "done/готово" prefix
+    lower = task_text.lower()
+    done_match = re.match(r"^(?:готово|done|✅|сделано)[:\s]+(.+)", lower)
+    if done_match:
+        query = done_match.group(1).strip()
+        tasks = collect_open_tasks()
+        # Fuzzy match
+        matched = [t for t in tasks if query in t["text"].lower()]
+        if len(matched) == 1:
+            ok = toggle_task_in_file(matched[0]["file"], matched[0]["line_idx"], close=True)
+            if ok:
+                await update.message.reply_text(f"✅ Закрыто:\n~{matched[0]['text']}~", parse_mode="Markdown")
+                return
+        elif len(matched) > 1:
+            # Show buttons to pick
+            context.user_data["tasks"] = matched
+            keyboard = []
+            for i, t in enumerate(matched[:10]):
+                keyboard.append([InlineKeyboardButton(t["text"][:45], callback_data=f"done:{i}")])
+            await update.message.reply_text("Несколько совпадений, выбери:", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        else:
+            await update.message.reply_text("Не нашёл такую задачу. Попробуй /done для списка.")
+            return
+
     await process_task(update, task_text)
 
 
@@ -515,6 +633,8 @@ def main() -> None:
     app.add_handler(CommandHandler("backlog", cmd_backlog))
     app.add_handler(CommandHandler("crm", cmd_crm))
     app.add_handler(CommandHandler("tracks", cmd_tracks))
+    app.add_handler(CommandHandler("done", cmd_done))
+    app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
