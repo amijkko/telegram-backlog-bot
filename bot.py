@@ -281,6 +281,29 @@ def detect_insight_tags(text: str) -> list[str]:
     return tags if tags else ["идея"]
 
 
+def save_link(project_id: str, url: str, description: str, tags: list[str]) -> None:
+    """Save link to project's KB index.md under ## Полезные ссылки section."""
+    project = PROJECTS[project_id]
+    index_path = f"{project['path']}/index.md"
+    result = github_get_file(index_path)
+    if not result:
+        return
+
+    content, sha = result
+    tags_str = " ".join(f"#{t}" for t in tags)
+    title = description if description else url
+    entry = f"- [{title}]({url}) `{tags_str}`"
+
+    if "## Полезные ссылки" in content:
+        content = content.replace("## Полезные ссылки", f"## Полезные ссылки\n{entry}", 1)
+    elif "## Insights" in content:
+        content = content.replace("## Insights", f"## Полезные ссылки\n{entry}\n\n## Insights")
+    elif "## Documents" in content:
+        content = content.replace("## Documents", f"## Полезные ссылки\n{entry}\n\n## Documents")
+
+    github_put_file(index_path, content, f"link/{project_id}: {title[:40]}", sha)
+
+
 def save_insight(project_id: str, text: str, tags: list[str]) -> None:
     """Save insight to project's KB index.md under ## Insights section."""
     project = PROJECTS[project_id]
@@ -846,6 +869,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         except Exception as e:
             await update.message.reply_text(f"Ошибка сохранения инсайта: {e}")
+        return
+
+    # Check for "ссылка:" prefix
+    link_match = re.match(r"^(?:ссылка|ссыл|link|🔗)[:\s]+(.+)", lower, re.IGNORECASE | re.DOTALL)
+    if link_match:
+        link_text = task_text[link_match.start(1):]
+        try:
+            # Extract URL(s) and description
+            urls = re.findall(r"https?://\S+", link_text)
+            if not urls:
+                await update.message.reply_text("Не нашёл ссылку. Формат: `ссылка: https://... описание`", parse_mode="Markdown")
+                return
+            # Everything that's not a URL is the description
+            description = re.sub(r"https?://\S+", "", link_text).strip(" ,:-—\n")
+
+            # Detect project
+            project_id = detect_project(link_text)
+            if not project_id:
+                project_id = detect_project_gpt(link_text + " " + description)
+            if project_id == "unknown":
+                project_id = "custody"
+
+            tags = detect_insight_tags(description or urls[0])
+
+            for url in urls:
+                save_link(project_id, url, description or url, tags)
+
+            tags_str = " ".join(f"#{t}" for t in tags)
+            await update.message.reply_text(
+                f"🔗 Сохранено в {PROJECTS[project_id]['name']}\n"
+                f"{tags_str}\n\n" + "\n".join(urls) +
+                (f"\n{description}" if description else ""),
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Ошибка сохранения ссылки: {e}")
         return
 
     # Check for "done/готово" prefix
