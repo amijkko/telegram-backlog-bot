@@ -394,16 +394,17 @@ def add_task_to_github(task_text: str) -> str:
     return PRIORITY_LABELS[priority]
 
 
-def save_to_kb(project_id: str, filename: str, text: str, summary: str) -> None:
+def save_to_kb(project_id: str, filename: str, text: str, summary: str, file_id: str = "") -> None:
     project = PROJECTS[project_id]
     now = datetime.now().strftime("%Y-%m-%d_%H-%M")
     safe_name = re.sub(r"[^\w\-.]", "_", filename.rsplit(".", 1)[0])
     doc_path = f"{project['path']}/{now}_{safe_name}.md"
 
+    file_id_line = f"*File ID: {file_id}*\n" if file_id else ""
     doc_content = f"""# {filename}
 *Added: {datetime.now().strftime("%Y-%m-%d %H:%M")}*
 *Project: {project['name']}*
-
+{file_id_line}
 ## Summary
 {summary}
 
@@ -690,9 +691,8 @@ async def cmd_insights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Пока нет инсайтов. Напиши `инсайт: твоя мысль`", parse_mode="Markdown")
 
 
-def extract_doc_summary(project_path: str, doc_link: str) -> str | None:
-    """Fetch a KB document and extract its Summary section."""
-    # doc_link is like "[Title](filename.md)"
+def extract_doc_info(project_path: str, doc_link: str) -> dict | None:
+    """Fetch a KB document and extract its file_id and summary."""
     m = re.search(r"\(([^)]+\.md)\)", doc_link)
     if not m:
         return None
@@ -701,10 +701,19 @@ def extract_doc_summary(project_path: str, doc_link: str) -> str | None:
     if not result:
         return None
     content = result[0]
-    if "## Summary" not in content:
-        return None
-    summary = content.split("## Summary")[1].split("\n## ")[0].strip()
-    return summary
+    info = {}
+    # Extract file_id
+    fid_m = re.search(r"\*File ID:\s*([^\*]+)\*", content)
+    if fid_m:
+        info["file_id"] = fid_m.group(1).strip()
+    # Extract summary
+    if "## Summary" in content:
+        info["summary"] = content.split("## Summary")[1].split("\n## ")[0].strip()
+    # Extract original filename from title
+    title_m = re.match(r"# (.+)", content)
+    if title_m:
+        info["filename"] = title_m.group(1).strip()
+    return info if info else None
 
 
 async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -728,38 +737,49 @@ async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if "## О проекте" in content:
         about = content.split("## О проекте")[1].split("\n## ")[0].strip()
 
-    # Extract key doc links and fetch summaries
+    # Extract key doc links
     key_docs = []
     if "**Ключевые документы**" in content:
         docs_section = content.split("**Ключевые документы**")[1].split("\n## ")[0].strip()
         for line in docs_section.split("\n"):
             line = line.strip()
             if line.startswith("- ["):
-                # Extract title
                 title_m = re.match(r"- \[([^\]]+)\]", line)
                 title = title_m.group(1) if title_m else "Документ"
-                summary = extract_doc_summary(project["path"], line)
-                if summary:
-                    key_docs.append((title, summary))
+                info = extract_doc_info(project["path"], line)
+                if info:
+                    info["title"] = title
+                    key_docs.append(info)
 
     await update.message.reply_text(f"📋 Загружаю данные по {project['name']}...")
 
-    # Build messages
+    # Send project description
     parts = [f"📋 *{project['name']}*"]
     if about:
         parts.append(about.replace("**", "*"))
-    if not about:
+    else:
         parts.append("Описание проекта пока не заполнено.")
-
-    # Send main info
     await update.message.reply_text("\n\n".join(parts)[:4000], parse_mode="Markdown")
 
-    # Send each key doc as separate message
-    for title, summary in key_docs:
-        clean_title = title.replace("_", " ")
+    # Send key documents
+    bot = update.get_bot()
+    chat_id = update.effective_chat.id
+    for doc in key_docs:
+        if doc.get("file_id"):
+            # Send original file
+            try:
+                await bot.send_document(chat_id=chat_id, document=doc["file_id"])
+                continue
+            except Exception:
+                pass
+        # Fallback: send summary as text
+        clean_title = doc.get("title", "Документ").replace("_", " ")
+        summary = doc.get("summary", "Нет саммари")
         clean_summary = summary.replace("*", "").replace("`", "").replace("_", " ")
-        doc_text = f"📎 *{clean_title}*\n\n{clean_summary}"
-        await update.message.reply_text(doc_text[:4000], parse_mode="Markdown")
+        await update.message.reply_text(
+            f"📎 *{clean_title}*\n\n{clean_summary}"[:4000],
+            parse_mode="Markdown",
+        )
 
 
 async def cmd_tracks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -921,8 +941,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Summarize
         summary = summarize_document(text, filename)
 
-        # Save to KB
-        save_to_kb(project_id, filename, text, summary)
+        # Save to KB (with Telegram file_id for re-sending)
+        save_to_kb(project_id, filename, text, summary, file_id=doc.file_id)
 
         project_name = PROJECTS[project_id]["name"]
         clean_summary = summary[:500].replace("*", "").replace("`", "").replace("_", "")
