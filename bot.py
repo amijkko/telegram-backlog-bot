@@ -317,46 +317,94 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def format_file_pretty(file_id: str, content: str) -> tuple[str, list[dict]]:
+    """Format markdown nicely for Telegram, collect open tasks."""
+    lines = content.split("\n")
+    formatted = []
+    tasks = []
+
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s or s.startswith("---") or s.startswith("*Last updated"):
+            continue
+        if s.startswith("# "):
+            formatted.append(f"*{s[2:]}*\n")
+        elif s.startswith("## "):
+            formatted.append(f"📌 *{s[3:]}*")
+        elif s.startswith("### "):
+            formatted.append(f"  🔹 *{s[4:]}*")
+        elif s.startswith("> "):
+            formatted.append(f"_{s[2:]}_")
+        elif s.startswith("- [x]"):
+            formatted.append(f"  ✅ ~{s[6:].strip()}~")
+        elif s.startswith("- [ ]"):
+            task_text = s[6:].strip()
+            if task_text and task_text != "[Task]":
+                num = len(tasks) + 1
+                formatted.append(f"  ⬜ {num}. {task_text}")
+                tasks.append({"file": file_id, "line_idx": i, "text": task_text})
+        elif s.startswith("- **"):
+            formatted.append(f"  {s[2:]}")
+        elif s.startswith("|"):
+            formatted.append(f"`{s}`")
+        else:
+            formatted.append(s)
+
+    return "\n".join(formatted), tasks
+
+
+def build_task_buttons(tasks: list[dict], prefix: str = "close") -> InlineKeyboardMarkup | None:
+    if not tasks:
+        return None
+    keyboard = []
+    row = []
+    for i, t in enumerate(tasks[:20]):
+        row.append(InlineKeyboardButton(f"✅ {i+1}", callback_data=f"{prefix}:{t['file']}:{t['line_idx']}"))
+        if len(row) == 5:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def send_formatted(update, file_id: str, context) -> None:
+    result = github_get_file(file_id)
+    if not result:
+        await update.message.reply_text(f"{file_id} не найден")
+        return
+    text, tasks = format_file_pretty(file_id, result[0])
+    markup = build_task_buttons(tasks)
+    await update.message.reply_text(text[:4000], parse_mode="Markdown", reply_markup=markup)
+
+
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
-    result = github_get_file("daily.md")
-    if result:
-        text = result[0]
-        # Trim to fit Telegram limit
-        await update.message.reply_text(text[:4000], parse_mode=None)
-    else:
-        await update.message.reply_text("daily.md не найден")
+    await send_formatted(update, "daily.md", context)
 
 
 async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
-    result = github_get_file("weekly.md")
-    if result:
-        await update.message.reply_text(result[0][:4000], parse_mode=None)
-    else:
-        await update.message.reply_text("weekly.md не найден")
+    await send_formatted(update, "weekly.md", context)
 
 
 async def cmd_backlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
-    result = github_get_file("backlog.md")
-    if result:
-        await update.message.reply_text(result[0][:4000], parse_mode=None)
-    else:
-        await update.message.reply_text("backlog.md не найден")
+    await send_formatted(update, "backlog.md", context)
 
 
 async def cmd_crm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
     result = github_get_file("crm.md")
-    if result:
-        await update.message.reply_text(result[0][:4000], parse_mode=None)
-    else:
+    if not result:
         await update.message.reply_text("crm.md не найден")
+        return
+    text, _ = format_file_pretty("crm.md", result[0])
+    await update.message.reply_text(text[:4000], parse_mode="Markdown")
 
 
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -390,13 +438,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
 
     data = query.data
-    if data.startswith("done:"):
+
+    if data.startswith("close:"):
+        parts = data.split(":", 2)
+        file_id = parts[1]
+        line_idx = int(parts[2])
+        ok = toggle_task_in_file(file_id, line_idx, close=True)
+        if ok:
+            # Re-render the file with updated state
+            result = github_get_file(file_id)
+            if result:
+                text, tasks = format_file_pretty(file_id, result[0])
+                markup = build_task_buttons(tasks)
+                await query.edit_message_text(text[:4000], parse_mode="Markdown", reply_markup=markup)
+            else:
+                await query.edit_message_text("✅ Задача закрыта!")
+        else:
+            await query.edit_message_text("Не удалось закрыть задачу.")
+
+    elif data.startswith("done:"):
         idx = int(data.split(":")[1])
         tasks = context.user_data.get("tasks", [])
         if idx >= len(tasks):
             await query.edit_message_text("Задача не найдена.")
             return
-
         task = tasks[idx]
         ok = toggle_task_in_file(task["file"], task["line_idx"], close=True)
         if ok:
@@ -404,25 +469,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.edit_message_text("Не удалось закрыть задачу.")
 
-    elif data.startswith("reopen:"):
-        parts = data.split(":", 2)
-        file_id = parts[1]
-        line_idx = int(parts[2])
-        ok = toggle_task_in_file(file_id, line_idx, close=False)
-        if ok:
-            await query.edit_message_text("🔄 Задача переоткрыта.")
-        else:
-            await query.edit_message_text("Не удалось переоткрыть задачу.")
-
 
 async def cmd_tracks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
-    result = github_get_file("tracks.md")
-    if result:
-        await update.message.reply_text(result[0][:4000], parse_mode=None)
-    else:
-        await update.message.reply_text("tracks.md не найден")
+    await send_formatted(update, "tracks.md", context)
 
 
 async def transcribe_voice(voice_file) -> str:
