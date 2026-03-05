@@ -504,20 +504,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     data = query.data
 
-    if data.startswith("close:"):
+    if data.startswith("refresh:"):
+        file_id = data.split(":", 1)[1]
+        result = github_get_file(file_id)
+        if result:
+            text, tasks = format_file_pretty(file_id, result[0])
+            markup = build_task_buttons(tasks)
+            await query.edit_message_text(text[:4000], parse_mode="Markdown", reply_markup=markup)
+        else:
+            await query.edit_message_text(f"{file_id} не найден")
+
+    elif data.startswith("close:"):
         parts = data.split(":", 2)
         file_id = parts[1]
         line_idx = int(parts[2])
         ok = toggle_task_in_file(file_id, line_idx, close=True)
         if ok:
-            # Re-render the file with updated state
+            # Read closed task text for confirmation
             result = github_get_file(file_id)
+            closed_text = ""
             if result:
-                text, tasks = format_file_pretty(file_id, result[0])
-                markup = build_task_buttons(tasks)
-                await query.edit_message_text(text[:4000], parse_mode="Markdown", reply_markup=markup)
-            else:
-                await query.edit_message_text("✅ Задача закрыта!")
+                lines = result[0].split("\n")
+                if line_idx < len(lines):
+                    closed_text = re.sub(r"^(?:-|\d+\.)\s*\[x\]\s*", "", lines[line_idx].strip())
+            refresh_btn = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Обновить список", callback_data=f"refresh:{file_id}")]
+            ])
+            await query.edit_message_text(
+                f"✅ {closed_text}\n\nНажми «Обновить» чтобы увидеть остальные задачи.",
+                reply_markup=refresh_btn,
+            )
         else:
             await query.edit_message_text("Не удалось закрыть задачу.")
 
