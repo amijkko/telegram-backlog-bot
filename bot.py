@@ -320,8 +320,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text = raw.decode("utf-8", errors="replace")
         elif ext in ("xlsx", "xls"):
             text = extract_xlsx_text(raw)
-        elif ext in ("doc", "docx"):
-            text = raw.decode("utf-8", errors="replace")[:500] + "\n[Binary document — partial extraction]"
+        elif ext == "docx":
+            text = extract_docx_text(raw)
+        elif ext == "doc":
+            text = raw.decode("utf-8", errors="replace")[:500] + "\n[Binary .doc — partial extraction]"
         else:
             text = raw.decode("utf-8", errors="replace")[:2000]
 
@@ -372,6 +374,25 @@ def extract_pdf_text(raw: bytes) -> str:
             capture_output=True, text=True, timeout=30,
         )
     return result.stdout if result.returncode == 0 else ""
+
+
+def extract_docx_text(raw: bytes) -> str:
+    import zipfile
+    import io
+    import xml.etree.ElementTree as ET
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            xml_content = z.read("word/document.xml")
+        tree = ET.fromstring(xml_content)
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        paragraphs = []
+        for p in tree.iter(f"{{{ns['w']}}}p"):
+            texts = [t.text for t in p.iter(f"{{{ns['w']}}}t") if t.text]
+            if texts:
+                paragraphs.append("".join(texts))
+        return "\n\n".join(paragraphs)
+    except Exception:
+        return ""
 
 
 def extract_xlsx_text(raw: bytes) -> str:
