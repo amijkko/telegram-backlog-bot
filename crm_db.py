@@ -5,6 +5,7 @@ import json
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
@@ -98,7 +99,7 @@ def init_db():
 # Contact CRUD
 # ============================================================================
 
-def find_contact(name_query: str) -> dict | None:
+def find_contact(name_query: str) -> Optional[dict]:
     """Find contact by name or alias (fuzzy match)."""
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -177,11 +178,12 @@ def add_contact(data: dict) -> int:
         aliases.add(a.lower())
     for alias in aliases:
         try:
+            cur.execute("SAVEPOINT sp_alias")
             cur.execute("INSERT INTO contact_aliases (contact_id, alias) VALUES (%s, %s)",
                          (contact_id, alias))
+            cur.execute("RELEASE SAVEPOINT sp_alias")
         except psycopg2.errors.UniqueViolation:
-            conn.rollback()
-            # Alias exists for another contact — skip
+            cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
             continue
 
     conn.commit()
@@ -370,7 +372,7 @@ def get_contact_tasks(contact_id: int, status: str = "open") -> list[dict]:
 # Full Card
 # ============================================================================
 
-def get_contact_card(name_query: str) -> str | None:
+def get_contact_card(name_query: str) -> Optional[str]:
     """Get full formatted contact card."""
     contact = find_contact(name_query)
     if not contact:
