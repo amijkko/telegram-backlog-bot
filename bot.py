@@ -8,6 +8,23 @@ from datetime import datetime
 
 print("Bot module loading...", flush=True)
 
+# CRM Database (optional — falls back to markdown if no DATABASE_URL)
+CRM_DB_ENABLED = False
+try:
+    if os.environ.get("CRM_DATABASE_URL") or os.environ.get("DATABASE_URL"):
+        from crm_db import (
+            init_db as crm_init_db, find_contact, add_contact as db_add_contact,
+            update_contact as db_update_contact, add_interaction, add_fact,
+            add_contact_task, get_contact_card, add_alias,
+            get_pings_today, get_pings_overdue, search_contacts as db_search_contacts,
+            import_from_markdown as db_import_markdown, export_to_markdown,
+        )
+        crm_init_db()
+        CRM_DB_ENABLED = True
+        print("CRM Database enabled", flush=True)
+except Exception as e:
+    print(f"CRM Database not available: {e}", flush=True)
+
 import httpx
 from dotenv import load_dotenv
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -800,7 +817,10 @@ def smart_analyze(text: str) -> dict:
     {{"text": "конкретная задача", "priority": "urgent/normal/low", "date": "YYYY-MM-DD или пусто"}}
   ],
   "crm_updates": [
-    {{"name": "Имя", "company": "Компания или пусто", "project": "project_id", "action": "add/update", "next_action": "следующее действие или пусто", "comment": "комментарий или пусто", "ping_date": "YYYY-MM-DD или пусто", "warmth": "пусто или новый/холодный/средняя/Хороший"}}
+    {{"name": "Имя", "company": "Компания или пусто", "project": "project_id", "action": "add/update", "next_action": "следующее действие или пусто", "comment": "комментарий или пусто", "ping_date": "YYYY-MM-DD или пусто", "warmth": "пусто или новый/холодный/средняя/Хороший",
+      "facts": [{{"category": "bio/connection/interest/personal/deal/how_met", "text": "конкретный факт о человеке"}}],
+      "interaction_summary": "краткое описание касания (что произошло)"
+    }}
   ],
   "insights": [
     {{"text": "инсайт/наблюдение/факт", "project": "project_id"}}
@@ -818,6 +838,14 @@ def smart_analyze(text: str) -> dict:
 - ВОПРОСЫ: если пользователь спрашивает вопрос ("в какой проект?", "что у меня на завтра?", "сколько задач?") — верни ТОЛЬКО "reply" с ответом. НЕ создавай задачи из вопросов!
 - Если простое действие (позвонить, написать, подготовить) — tasks
 - Если упоминается человек + новая инфо для запоминания — crm_updates
+- crm_updates.facts: ВСЕГДА извлекай факты о человеке из контекста:
+  bio = кто он, должность, чем занимается, бэкграунд
+  connection = кого знает, через кого пришёл
+  interest = интересы, хобби
+  personal = личное (город, семья, привычки)
+  deal = контекст сделки/переговоров
+  how_met = как познакомились
+- crm_updates.interaction_summary: кратко что произошло (1 строка)
 - Если наблюдение/вывод о рынке/продукте/стратегии — insights
 - Если "сделал/готово/закрыл/отправил" что-то — done (найдём задачу по ключевым словам)
 - Если "перенеси/сдвинь на..." — moves
@@ -1171,7 +1199,31 @@ async def cmd_backlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cmd_crm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
-    # Show all CRM files
+
+    args = " ".join(context.args) if context.args else ""
+
+    # If DB enabled and name provided — show full card
+    if CRM_DB_ENABLED and args:
+        card = get_contact_card(args)
+        if card:
+            await update.message.reply_text(card[:4000], parse_mode="Markdown")
+            return
+        else:
+            # Try search
+            results = db_search_contacts(args, limit=5)
+            if results:
+                lines = [f"Не нашёл точного совпадения для *{args}*. Похожие:\n"]
+                for r in results:
+                    line = f"• *{r['name']}*"
+                    if r.get("company"):
+                        line += f" ({r['company']})"
+                    if r.get("next_action"):
+                        line += f" → {r['next_action']}"
+                    lines.append(line)
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+                return
+
+    # Fallback: show all CRM from markdown files
     all_parts = []
     seen = set()
     for pid, proj in PROJECTS.items():
@@ -1192,6 +1244,30 @@ async def cmd_crm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("CRM пуст")
 
 
+async def cmd_crm_import(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Import existing markdown CRM into database."""
+    if update.effective_user.id != ALLOWED_USER_ID:
+        return
+    if not CRM_DB_ENABLED:
+        await update.message.reply_text("CRM Database не подключена. Нужна переменная DATABASE_URL.")
+        return
+
+    await update.message.reply_text("Импортирую CRM из markdown...")
+    total = 0
+    seen = set()
+    for pid, proj in PROJECTS.items():
+        crm_file = proj.get("crm", CRM_FILE)
+        if crm_file in seen:
+            continue
+        seen.add(crm_file)
+        result = github_get_file(crm_file)
+        if result:
+            count = db_import_markdown(result[0], project=pid)
+            total += count
+
+    await update.message.reply_text(f"Импортировано {total} контактов в базу данных.")
+
+
 async def cmd_meetings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ALLOWED_USER_ID:
         return
@@ -1199,6 +1275,7 @@ async def cmd_meetings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         r = httpx.get(f"{GITHUB_BASE}/meetings", headers=GH_HEADERS, timeout=10)
         if r.status_code == 404:
             await update.message.reply_text("Пока нет записей встреч.")
+
             return
         r.raise_for_status()
         files = r.json()
@@ -1786,11 +1863,53 @@ async def smart_process(update: Update, text: str, context: ContextTypes.DEFAULT
             except Exception:
                 pass
 
-        # 4. CRM updates (project-aware)
+        # 4. CRM updates (project-aware) — write to DB + markdown
         for c in result.get("crm_updates", []):
             try:
                 project_id = c.get("project", "")
                 crm_target = get_crm_file(project_id) if project_id else None
+
+                # --- Database CRM ---
+                if CRM_DB_ENABLED:
+                    try:
+                        contact = find_contact(c.get("name", ""))
+                        if contact:
+                            # Update existing
+                            db_update_contact(contact["id"], {
+                                k: v for k, v in {
+                                    "next_action": c.get("next_action"),
+                                    "ping_date": c.get("ping_date"),
+                                    "warmth": c.get("warmth"),
+                                    "company": c.get("company"),
+                                    "project": project_id or None,
+                                }.items() if v
+                            })
+                            cid = contact["id"]
+                        else:
+                            # Add new
+                            cid = db_add_contact({
+                                "name": c.get("name", ""),
+                                "company": c.get("company"),
+                                "project": project_id or None,
+                                "next_action": c.get("next_action"),
+                                "ping_date": c.get("ping_date"),
+                                "warmth": c.get("warmth", "новый"),
+                            })
+
+                        # Log interaction
+                        ix_summary = c.get("interaction_summary") or c.get("comment") or c.get("next_action") or ""
+                        ix_id = None
+                        if ix_summary:
+                            ix_id = add_interaction(cid, "note", ix_summary)
+
+                        # Save facts
+                        for fact in c.get("facts", []):
+                            if fact.get("text"):
+                                add_fact(cid, fact.get("category", "bio"), fact["text"], ix_id)
+                    except Exception as db_err:
+                        print(f"CRM DB error: {db_err}", flush=True)
+
+                # --- Markdown CRM (backward compat) ---
                 if c.get("action") == "update":
                     name = update_crm_contact(c.get("name", ""), c, crm_target)
                     if name:
@@ -2708,6 +2827,7 @@ def main() -> None:
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("backlog", cmd_backlog))
     app.add_handler(CommandHandler("crm", cmd_crm))
+    app.add_handler(CommandHandler("crm_import", cmd_crm_import))
     app.add_handler(CommandHandler("meetings", cmd_meetings))
     app.add_handler(CommandHandler("morning", cmd_morning))
     app.add_handler(CommandHandler("evening", cmd_evening))
