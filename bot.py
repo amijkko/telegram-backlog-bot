@@ -128,10 +128,23 @@ MONTHS_RU = {
 DAY_NAMES_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
 
+def _next_weekday(from_date, target_weekday: int, force_next: bool = False) -> str:
+    """Return ISO date string for next occurrence of target weekday."""
+    from datetime import timedelta
+    days_ahead = (target_weekday - from_date.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    if force_next and days_ahead < 7:
+        days_ahead += 7
+    d = from_date + timedelta(days=days_ahead)
+    return d.strftime("%Y-%m-%d")
+
+
 def parse_date(text: str) -> tuple[str | None, str]:
     """Extract date from Russian text. Returns (date_label, cleaned_text)."""
-    from datetime import timedelta
-    today = datetime.now().date()
+    from datetime import timedelta, timezone
+    moscow_tz = timezone(timedelta(hours=3))
+    today = datetime.now(moscow_tz).date()
     lower = text.lower()
 
     # "сегодня"
@@ -730,8 +743,10 @@ def gpt_parse_meeting(notes: str, project_hint: str = "") -> dict:
 
 def smart_analyze(text: str) -> dict:
     """Use Claude to analyze free-form text and determine all needed actions."""
+    from datetime import timezone, timedelta
+    moscow_tz = timezone(timedelta(hours=3))
     projects_list = ", ".join(f"{k} ({v['name']})" for k, v in PROJECTS.items())
-    today = datetime.now()
+    today = datetime.now(moscow_tz)
     date_str = today.strftime("%Y-%m-%d")
     weekday = DAY_NAMES_SHORT[today.weekday()]
 
@@ -809,7 +824,18 @@ def smart_analyze(text: str) -> dict:
 - Если заметки со встречи (несколько решений, разные люди, план) — meeting с полными заметками
 - ОДНО сообщение может содержать НЕСКОЛЬКО типов действий одновременно
 - ПРИОРИТЕТ: задача на эту неделю (до 7 дней) = "urgent". Задача на 2+ недели = "normal". Без дедлайна = "low"
-- date: "завтра" = +1 день, "в понедельник" = ближайший пн, "на следующей неделе" = пн след. недели
+- date: используй ТОЛЬКО эти даты:
+  "сегодня" = {date_str}
+  "завтра" = {(today + timedelta(days=1)).strftime("%Y-%m-%d")}
+  "послезавтра" = {(today + timedelta(days=2)).strftime("%Y-%m-%d")}
+  "понедельник" = {_next_weekday(today, 0)}
+  "вторник" = {_next_weekday(today, 1)}
+  "среда" = {_next_weekday(today, 2)}
+  "четверг" = {_next_weekday(today, 3)}
+  "пятница" = {_next_weekday(today, 4)}
+  "суббота" = {_next_weekday(today, 5)}
+  "воскресенье" = {_next_weekday(today, 6)}
+  "на следующей неделе" = {_next_weekday(today, 0, force_next=True)}
 - Если action=update для CRM и контакт уже в списке — обнови, иначе action=add
 - CRM project: определи к какому проекту относится контакт (custody, sber, blind-bets, reksoft). Гаймаков/Сбер = "sber"
 - Пустые массивы НЕ включай в ответ
