@@ -2817,7 +2817,7 @@ def main() -> None:
         )
     except Exception as e:
         print(f"Webhook cleanup failed: {e}", flush=True)
-    time.sleep(3)
+    time.sleep(15)
 
     from datetime import time as dt_time, timezone, timedelta
 
