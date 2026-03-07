@@ -394,10 +394,13 @@ def get_contact_card(name_query: str) -> Optional[str]:
     lines.append(f"Теплота: {contact.get('warmth', '?')} | Уверенность: {contact.get('confidence', 0)}%")
     lines.append("")
 
-    # Bio & context
-    bio_parts = facts.get("bio", [])
+    # Bio & context (deduplicate)
+    bio_parts = []
     if contact.get("bio"):
-        bio_parts = [contact["bio"]] + bio_parts
+        bio_parts.append(contact["bio"])
+    for f in facts.get("bio", []):
+        if f not in bio_parts:
+            bio_parts.append(f)
     if bio_parts:
         lines.append(f"📝 *Кто:* {'; '.join(bio_parts)}")
 
